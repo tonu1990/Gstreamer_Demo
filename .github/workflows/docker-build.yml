@@ -6,20 +6,22 @@ on:
   pull_request:
     branches: [ main, master ]
 
-env:
-  # Force lowercase repository name
-  IMAGE_NAME: ${{ lower(github.repository) }}
-
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-
+    
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+
+    - name: Convert repository name to lowercase
+      id: set-lowercase
+      run: |
+        LOWERCASE_REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+        echo "LOWERCASE_REPO=$LOWERCASE_REPO" >> $GITHUB_OUTPUT
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
@@ -38,7 +40,7 @@ jobs:
         platforms: linux/arm64
         push: true
         tags: |
-          ghcr.io/${{ env.IMAGE_NAME }}:latest
-          ghcr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          ghcr.io/${{ steps.set-lowercase.outputs.LOWERCASE_REPO }}:latest
+          ghcr.io/${{ steps.set-lowercase.outputs.LOWERCASE_REPO }}:${{ github.sha }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
