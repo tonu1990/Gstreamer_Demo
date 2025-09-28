@@ -1,4 +1,3 @@
-# Debian base so python3-gi matches interpreter (avoids _gi issues)
 FROM debian:bookworm-slim
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -16,7 +15,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libegl1 libgles2 libdrm2 \
  && rm -rf /var/lib/apt/lists/*
 
-# Make writable cache locations for Fontconfig when running as non-root
 RUN mkdir -p /var/cache/fontconfig /usr/share/fonts /tmp/.cache/fontconfig && \
     chmod -R 777 /var/cache/fontconfig /tmp/.cache && \
     fc-cache -f -v
