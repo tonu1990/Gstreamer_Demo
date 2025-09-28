@@ -26,11 +26,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Your source
 COPY src/ ./src/
 
-# Make sure Python can import from /app/src
-ENV PYTHONPATH=/app/src \
-    # Force Qt to X11; works on X11 or Wayland (via XWayland)
+# Make sure Python can import both your src and Debian's dist-packages (for gi)
+ENV PYTHONPATH=/usr/lib/python3/dist-packages:/app/src \
     QT_QPA_PLATFORM=xcb \
-    # Avoid MIT-SHM issues with X11 sockets in containers
     QT_X11_NO_MITSHM=1 \
     PYTHONUNBUFFERED=1
 
