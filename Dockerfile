@@ -1,48 +1,38 @@
-# This file redirects to the actual Dockerfile in the docker/ directory
-# Use Raspberry Pi OS as base image
-FROM balenalib/raspberrypi4-64-debian:bullseye
+# Project_Gstreamer_2/Dockerfile
+FROM python:3.11-slim
 
-# Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive
-ENV PYTHONUNBUFFERED=1
 
-# Set working directory
-WORKDIR /app
-
-# Install system dependencies and GStreamer
-RUN apt-get update && apt-get install -y \
-    python3 \
-    python3-pip \
+# System deps for GStreamer, PyGObject (gi), and Qt GUI over X11/XWayland
+RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-gi \
-    gir1.2-gst-rtsp-server-1.0 \
+    gir1.2-gstreamer-1.0 \
     gstreamer1.0-tools \
+    gstreamer1.0-plugins-base \
     gstreamer1.0-plugins-good \
     gstreamer1.0-plugins-bad \
     gstreamer1.0-plugins-ugly \
-    gstreamer1.0-libav \
-    gstreamer1.0-x \
-    gstreamer1.0-alsa \
-    libgstreamer1.0-dev \
-    libgstreamer-plugins-base1.0-dev \
-    libglib2.0-dev \
-    libcairo2-dev \
-    pkg-config \
-    && rm -rf /var/lib/apt/lists/*
+    gstreamer1.0-gl \
+    libx11-6 libxext6 libxrender1 libxcb1 libxkbcommon-x11-0 \
+    libgl1 libglib2.0-0 libdbus-1-3 \
+ && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
+WORKDIR /app
+
+# Only PySide6 via pip; gi/GStreamer come from apt (more reliable on ARM)
 COPY requirements.txt .
-RUN pip3 install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
+# Your source
 COPY src/ ./src/
-COPY scripts/ ./scripts/
 
-# Make scripts executable
-RUN chmod +x /app/scripts/entrypoint.sh
+# Make sure Python can import from /app/src
+ENV PYTHONPATH=/app/src \
+    # Force Qt to X11; works on X11 or Wayland (via XWayland)
+    QT_QPA_PLATFORM=xcb \
+    # Avoid MIT-SHM issues with X11 sockets in containers
+    QT_X11_NO_MITSHM=1 \
+    PYTHONUNBUFFERED=1
 
-# Create a non-root user
-RUN useradd -m appuser && chown -R appuser:appuser /app
-USER appuser
-
-# Set the entry point
-CMD ["/app/scripts/entrypoint.sh"]
+# Launch the app
+CMD ["python", "-m", "app.main"]
