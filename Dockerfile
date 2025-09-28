@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gstreamer1.0-tools gstreamer1.0-plugins-base \
     gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
     gstreamer1.0-gl \
-    gir1.2-gst-plugins-base-1.0 \   # <-- THIS is the missing typelib for GstVideo \
+    gir1.2-gst-plugins-base-1.0 \   
     libx11-6 libx11-xcb1 libxext6 libxrender1 libxcb1 libxkbcommon-x11-0 \
     libxfixes3 libxi6 libxcomposite1 libxrandr2 libfontconfig1 \
     libgl1 libglib2.0-0 libdbus-1-3 \
