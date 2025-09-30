@@ -8,10 +8,6 @@ on:
         description: "Image tag (defaults: latest or branch-name)"
         required: false
         default: ""
-  # Optional: auto-build on pushes
-  push:
-    branches: [ "main" ]
-    tags: [ "v*.*.*" ]
 
 permissions:
   contents: read
