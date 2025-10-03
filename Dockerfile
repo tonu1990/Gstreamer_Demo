@@ -20,9 +20,4 @@ ENV LABELS_PATH=/app/labels.json
 # Make Python see /app/src as a top-level package root
 ENV PYTHONPATH=/app/src
 
-# (keep your apt installs for GTK/gi/cairo/gstreamer that we discussed)
-
-# If you also use requirements.txt, install it here
-RUN pip install -r requirements.txt
-
 CMD ["python3", "-m", "app.main"]
