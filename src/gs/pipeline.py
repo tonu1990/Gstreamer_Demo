@@ -1,6 +1,7 @@
 import logging
 import threading
 import time
+import os
 
 import gi
 gi.require_version('Gst', '1.0')
@@ -18,6 +19,9 @@ from pathlib import Path
 from detect.onnx_yolov8 import OnnxYoloV8
 
 log = logging.getLogger(__name__)
+
+DRAW_PROBE_BOX = os.getenv("DRAW_PROBE_BOX", "0") == "1"   # force a test rectangle
+OD_LOG_EVERY   = int(os.getenv("OD_LOG_EVERY", "1"))        # log every N frames (1 = log every frame)
 
 class CameraPipeline:
     """
@@ -192,7 +196,6 @@ class CameraPipeline:
 
         self._detection_enabled = enable
         if enable:
-            # Sanity: model path must exist
             if not Path(MODEL_PATH).exists():
                 log.error(f"MODEL_PATH not found: {MODEL_PATH}")
                 self._detection_enabled = False
@@ -257,7 +260,11 @@ class CameraPipeline:
                     continue
                 try:
                     frame = np.frombuffer(mapinfo.data, dtype=np.uint8).reshape((h, w, 3))  # RGB
-                    self._frames_pulled += 1
+                    idx = self._frames_pulled + 1
+                    self._frames_pulled = idx
+
+                    if idx % OD_LOG_EVERY == 0:
+                        log.debug(f"[worker] F{idx}: pulled frame {w}x{h} RGB")
 
                     # Inference
                     dets_sq = self._model.infer_rgb_square(frame, conf_thres=0.15, iou_thres=0.45, top_k=300)
@@ -265,12 +272,15 @@ class CameraPipeline:
                     if n > 0:
                         self._frames_with_dets += 1
 
+                    if idx % OD_LOG_EVERY == 0:
+                        # Log up to 3 boxes
+                        sample_boxes = dets_sq["boxes"][:3]
+                        sample_scores = dets_sq["scores"][:3]
+                        sample_classes = dets_sq["classes"][:3]
+                        log.debug(f"[worker] F{idx}: n_dets={n}, boxes(model_space)={sample_boxes}, scores={sample_scores}, classes={sample_classes}")
+
                     with self._dets_lock:
-                        self._latest_dets = {
-                            "boxes": dets_sq["boxes"],
-                            "scores": dets_sq["scores"],
-                            "classes": dets_sq["classes"],
-                        }
+                        self._latest_dets = dets_sq
                 finally:
                     buf.unmap(mapinfo)
 
@@ -282,11 +292,10 @@ class CameraPipeline:
     def _report_stats(self):
         now = time.time()
         if now - self._last_stat_ts >= 2.0:
-            if self._frames_pulled:
-                ratio = (self._frames_with_dets / self._frames_pulled) * 100.0
-            else:
-                ratio = 0.0
-            log.info(f"[worker] pulled={self._frames_pulled}, frames_with_dets={self._frames_with_dets} ({ratio:.1f}%)")
+            pulled = self._frames_pulled
+            with_d = self._frames_with_dets
+            ratio = (with_d / pulled * 100.0) if pulled else 0.0
+            log.info(f"[worker] pulled={pulled}, frames_with_dets={with_d} ({ratio:.1f}%)")
             self._last_stat_ts = now
 
     # -------- Overlay callbacks --------
@@ -297,16 +306,26 @@ class CameraPipeline:
         log.info(f"Overlay caps-changed: {self._disp_w}x{self._disp_h}")
 
     def _on_overlay_draw(self, overlay, context, timestamp, duration):
-        # Always draw a tiny watermark when detection mode is ON (sanity check)
+        # Probe rectangle (proves drawing works)
+        if DRAW_PROBE_BOX:
+            try:
+                context.set_source_rgb(1.0, 1.0, 0.0)  # yellow
+                context.set_line_width(3.0)
+                context.rectangle(40, 40, 160, 120)
+                context.stroke()
+            except Exception as e:
+                log.debug(f"Overlay probe box error: {e}")
+
+        # Watermark when detection is ON
         if self._detection_enabled:
             try:
                 context.set_source_rgb(1.0, 0.0, 0.0)  # red
                 context.set_line_width(2.0)
-                context.rectangle(6, 6, 120, 26)
+                context.rectangle(6, 6, 130, 26)
                 context.stroke()
                 context.select_font_face("Sans")
                 context.set_font_size(16.0)
-                context.move_to(12, 24)
+                context.move_to(10, 24)
                 context.show_text("DETECT ON")
                 context.stroke()
             except Exception as e:
@@ -315,6 +334,10 @@ class CameraPipeline:
         # Draw detections (if any)
         with self._dets_lock:
             dets = self._latest_dets
+
+        n_dets = 0 if not dets else len(dets.get("boxes", []))
+        if self._detection_enabled and dets:
+            log.debug(f"[draw] have {n_dets} dets; disp={self._disp_w}x{self._disp_h} model={MODEL_INPUT_SIZE}")
 
         if not self._detection_enabled or not dets or not dets.get("boxes"):
             return
@@ -329,18 +352,16 @@ class CameraPipeline:
             context.set_line_width(3.0)
             context.select_font_face("Sans")
             context.set_font_size(14.0)
-            # Log the first few boxes once (helpful for scale debugging)
-            if hasattr(self, "_logged_first_boxes") is False or getattr(self, "_logged_first_boxes", False) is False:
-                sample_boxes = dets["boxes"][:3]
-                log.info(f"Sample boxes (model space): {sample_boxes}")
-                self._logged_first_boxes = True
 
-            for (x1, y1, x2, y2), score, cls_id in zip(dets["boxes"], dets["scores"], dets["classes"]):
-                # Scale from model square space to display
+            # Log first few boxes in both spaces (model space and scaled display)
+            for i, (xyxy, score, cls_id) in enumerate(zip(dets["boxes"], dets["scores"], dets["classes"])):
+                if i < 3:
+                    X1 = xyxy[0] * sx; Y1 = xyxy[1] * sy; X2 = xyxy[2] * sx; Y2 = xyxy[3] * sy
+                    log.debug(f"[draw] box{i}: model={xyxy} -> disp={[X1, Y1, X2, Y2]} score={score:.2f} cls={cls_id}")
+
+                x1, y1, x2, y2 = xyxy
                 X1 = x1 * sx; Y1 = y1 * sy; X2 = x2 * sx; Y2 = y2 * sy
                 w = max(0.0, X2 - X1); h = max(0.0, Y2 - Y1)
-
-                # Safety: skip degenerate boxes
                 if w < 1.0 or h < 1.0:
                     continue
 
@@ -358,7 +379,6 @@ class CameraPipeline:
                     pass
         except Exception as e:
             log.debug(f"Overlay draw error: {e}")
-
 
     # -------- Bus callbacks --------
     def _on_error(self, bus, msg):
