@@ -23,6 +23,6 @@ ENV PYTHONPATH=/app/src
 # (keep your apt installs for GTK/gi/cairo/gstreamer that we discussed)
 
 # If you also use requirements.txt, install it here
-# RUN pip install -r requirements.txt
+RUN pip install -r requirements.txt
 
 CMD ["python3", "-m", "app.main"]
