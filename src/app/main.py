@@ -1,50 +1,65 @@
-import os, sys
-import gi
-gi.require_version('Gst', '1.0')
-from gi.repository import Gst
-
-from PySide6.QtWidgets import QApplication
-from ui.main_window import MainWindow
-from gs.pipeline import CameraPipeline
-from app.config import DEVICE, caps_str, QT_PLATFORM
-from app.logging_setup import init_logging
+# src/app/main.py
+import os
+import sys
 import logging
 
+from app.ui import run_app            # however you bootstrap the GTK loop
+from gs.pipeline import CameraPipeline
+
+log = logging.getLogger(__name__)
+
+def _as_bool(v: str | None, default=False) -> bool:
+    if v is None:
+        return default
+    return v.strip().lower() in ("1", "true", "yes", "on")
+
 def main():
-    # Start logging first
-    log_path = init_logging("Gstreamer_Demo")
-    log = logging.getLogger(__name__)
-    log.info("Main starting")
-    log.info(f"Log file at: {log_path}")
+    # --- read config from env ---
+    model_path = os.getenv("MODEL_PATH")
+    model_input = os.getenv("MODEL_INPUT_SIZE", "640")
+    log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+    draw_probe_box = _as_bool(os.getenv("DRAW_PROBE_BOX"), default=False)
+    od_log_every  = int(os.getenv("OD_LOG_EVERY", "10"))
+    od_info_every = int(os.getenv("OD_INFO_EVERY", "30"))
+    labels_path   = os.getenv("LABELS_PATH", "/app/labels.json")  # your repo copy
 
-    if QT_PLATFORM:
-        os.environ.setdefault("QT_QPA_PLATFORM", QT_PLATFORM)
+    # --- logging ---
+    logging.basicConfig(
+        level=getattr(logging, log_level, logging.INFO),
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+    log.info("=== Application logging started ===")
 
-    Gst.init(sys.argv)
+    # --- validate inputs early with helpful messages ---
+    if not model_path:
+        log.error("MODEL_PATH env is not set.")
+        sys.exit(2)
+    if not os.path.exists(model_path):
+        log.error("MODEL_PATH not found inside container: %s", model_path)
+        sys.exit(2)
 
-    app = QApplication(sys.argv)
-    ui = MainWindow()
-    pipe = CameraPipeline()
+    try:
+        model_input = int(model_input)
+    except ValueError:
+        log.error("MODEL_INPUT_SIZE must be an integer, got %r", model_input)
+        sys.exit(2)
 
-    def on_preview(toggled: bool):
-        if toggled:
-            built = pipe.build(device=DEVICE, caps_str=caps_str(), window_handle=ui.video_handle())
-            if not built or not pipe.start():
-                ui.set_preview_failed()
-        else:
-            pipe.stop()
+    if not os.path.exists(labels_path):
+        log.warning("labels.json not found at %s (labels will be IDs only)", labels_path)
+        labels_path = None
 
-    def on_detection(start: bool):
-        if not pipe.pipeline:
-            logging.getLogger(__name__).warning("Detection toggle ignored: pipeline not running")
-            return
-        pipe.set_detection_enabled(start)
+    # --- create pipeline with explicit args ---
+    pipe = CameraPipeline(
+        model_path=model_path,
+        model_input_size=model_input,
+        labels_path=labels_path,          # can be None
+        draw_probe_box=draw_probe_box,
+        od_log_every=od_log_every,
+        od_info_every=od_info_every,
+    )
 
-    ui.preview_toggled.connect(on_preview)
-    ui.detection_toggled.connect(on_detection)
-
-    ui.show()
-    return sys.exit(app.exec())
+    # Hand pipe to your GTK UI bootstrap
+    run_app(pipe)
 
 if __name__ == "__main__":
     main()
