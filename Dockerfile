@@ -39,6 +39,8 @@ RUN python3 -m venv /opt/venv --system-site-packages && \
 
 # App source
 COPY src/ ./src/
+COPY labels.json /app/labels.json
+
 
 # Runtime env
 ENV PATH="/opt/venv/bin:${PATH}" \
