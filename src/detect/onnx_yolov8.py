@@ -1,9 +1,13 @@
-import os
+import logging
 import numpy as np
 import onnxruntime as ort
 
+log = logging.getLogger(__name__)
+
+def _sigmoid(x):
+    return 1.0 / (1.0 + np.exp(-x))
+
 def _nms_xyxy(boxes, scores, iou_thres=0.45, top_k=300):
-    # Simple NMS for (N,4) xyxy and (N,) scores
     if boxes.size == 0:
         return np.array([], dtype=np.int32)
     x1, y1, x2, y2 = boxes.T
@@ -26,9 +30,11 @@ def _nms_xyxy(boxes, scores, iou_thres=0.45, top_k=300):
     return np.array(keep, dtype=np.int32)
 
 class OnnxYoloV8:
-    def __init__(self, model_path: str, input_size: int = 640):
+    def __init__(self, model_path: str, input_size: int = 640, apply_sigmoid: bool = False):
         self.model_path = model_path
         self.input_size = int(input_size)
+        self.apply_sigmoid = bool(apply_sigmoid)
+
         so = ort.SessionOptions()
         so.enable_mem_pattern = False
         so.enable_cpu_mem_arena = True
@@ -36,38 +42,48 @@ class OnnxYoloV8:
         self.sess = ort.InferenceSession(model_path, sess_options=so, providers=providers)
         self.iname = self.sess.get_inputs()[0].name
         self.onames = [o.name for o in self.sess.get_outputs()]
-        # Detect output layout once: (1, N, 84) or (1, 84, N)
+
+        # Probe output shape/layout
         dummy = np.zeros((1, 3, self.input_size, self.input_size), dtype=np.float32)
         out = self.sess.run(self.onames, {self.iname: dummy})[0]
         if out.ndim != 3:
             raise RuntimeError(f"Unexpected YOLOv8 ONNX output shape: {out.shape}")
         self.layout_N_first = out.shape[1] > out.shape[2]  # True if (1, N, 84)
+        log.info(f"Loaded ONNX: {model_path}")
+        log.info(f"Output shape example: {out.shape}, layout_N_first={self.layout_N_first}, apply_sigmoid={self.apply_sigmoid}")
 
-    def infer_rgb_square(self, rgb: np.ndarray, conf_thres=0.25, iou_thres=0.45, top_k=300):
+    def infer_rgb_square(self, rgb: np.ndarray, conf_thres=0.15, iou_thres=0.45, top_k=300):
         """
-        rgb: HxWx3, already resized to (input_size,input_size), RGB uint8
+        rgb: HxWx3 uint8, already resized to (input_size,input_size), RGB
         Returns dict with xyxy boxes in that square space.
         """
-        # Normalize to [0,1], NCHW
         img = rgb.astype(np.float32) / 255.0
         img = np.transpose(img, (2, 0, 1))[None, ...]  # (1,3,H,W)
 
         out = self.sess.run(self.onames, {self.iname: img})[0]  # (1,N,84) or (1,84,N)
-        if self.layout_N_first:
-            preds = out[0]  # (N, 84)
-            # x y w h + C scores
-            xywh = preds[:, :4]
-            cls_scores = preds[:, 4:]
-        else:
-            preds = out[0]  # (84, N)
-            xywh = preds[:4, :].T
-            cls_scores = preds[4:, :].T
 
-        # confidence per class
-        class_ids = np.argmax(cls_scores, axis=1)
-        confs = cls_scores[np.arange(cls_scores.shape[0]), class_ids]
+        if self.layout_N_first:
+            preds = out[0]              # (N, 84)
+            xywh = preds[:, :4]
+            scores_all = preds[:, 4:]   # class scores (80 cols)
+        else:
+            preds = out[0]              # (84, N)
+            xywh = preds[:4, :].T
+            scores_all = preds[4:, :].T
+
+        if self.apply_sigmoid:
+            scores_all = _sigmoid(scores_all)
+
+        class_ids = np.argmax(scores_all, axis=1)
+        confs = scores_all[np.arange(scores_all.shape[0]), class_ids]
+
+        # Debug: counts before/after threshold
+        total_preds = confs.shape[0]
         keep = confs >= conf_thres
-        if not np.any(keep):
+        kept = int(np.count_nonzero(keep))
+        log.debug(f"YOLO: total={total_preds}, kept@{conf_thres}={kept}")
+
+        if kept == 0:
             return {"boxes": [], "scores": [], "classes": []}
 
         xywh = xywh[keep]
@@ -82,7 +98,6 @@ class OnnxYoloV8:
         y2 = y + h / 2
         boxes_xyxy = np.stack([x1, y1, x2, y2], axis=1)
 
-        # NMS
         keep_idx = _nms_xyxy(boxes_xyxy, confs, iou_thres=iou_thres, top_k=top_k)
         boxes_xyxy = boxes_xyxy[keep_idx]
         confs = confs[keep_idx]

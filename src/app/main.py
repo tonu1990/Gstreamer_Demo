@@ -7,13 +7,19 @@ from PySide6.QtWidgets import QApplication
 from ui.main_window import MainWindow
 from gs.pipeline import CameraPipeline
 from app.config import DEVICE, caps_str, QT_PLATFORM
+from app.logging_setup import init_logging
+import logging
 
 def main():
-    # Optional: force Qt to X11 if Wayland embedding gives trouble
+    # Start logging first
+    log_path = init_logging("Gstreamer_Demo")
+    log = logging.getLogger(__name__)
+    log.info("Main starting")
+    log.info(f"Log file at: {log_path}")
+
     if QT_PLATFORM:
         os.environ.setdefault("QT_QPA_PLATFORM", QT_PLATFORM)
 
-    # Init GStreamer early
     Gst.init(sys.argv)
 
     app = QApplication(sys.argv)
@@ -29,10 +35,8 @@ def main():
             pipe.stop()
 
     def on_detection(start: bool):
-        # UI already disables the button when preview is off,
-        # but keep a safety guard to avoid surprises.
         if not pipe.pipeline:
-            print("Detection toggle ignored: preview pipeline not running.")
+            logging.getLogger(__name__).warning("Detection toggle ignored: pipeline not running")
             return
         pipe.set_detection_enabled(start)
 
@@ -40,7 +44,7 @@ def main():
     ui.detection_toggled.connect(on_detection)
 
     ui.show()
-    sys.exit(app.exec())
+    return sys.exit(app.exec())
 
 if __name__ == "__main__":
     main()
