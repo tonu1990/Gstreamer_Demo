@@ -3,14 +3,12 @@ import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst
 
-# You can override with: GST_SINK=ximagesink or GST_SINK=glimagesink
 FORCED_SINK = os.getenv("GST_SINK", "").strip()
 
-# Default order: prefer ximagesink first to avoid GL issues in Docker
-PREFERRED_SINKS = ("ximagesink", "xvimagesink", "glimagesink")
+# Prefer GL first (it’s available for you), but allow env override
+PREFERRED_SINKS = ("glimagesink", "ximagesink", "xvimagesink")
 
 def choose_sink():
-    # If user explicitly requested a sink
     if FORCED_SINK:
         sink = Gst.ElementFactory.make(FORCED_SINK, "sink")
         if sink:
