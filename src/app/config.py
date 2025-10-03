@@ -11,3 +11,8 @@ QT_PLATFORM = os.getenv("QT_QPA_PLATFORM", "")  # e.g., "xcb"
 def caps_str(width=WIDTH, height=HEIGHT) -> str:
     # keep it simple; add format/framerate later if needed
     return f"video/x-raw,width={width},height={height}"
+
+
+# ONNX model config (mounted at runtime)
+MODEL_PATH = os.getenv("MODEL_PATH", "/models/current.onnx")
+MODEL_INPUT_SIZE = int(os.getenv("MODEL_INPUT_SIZE", "640"))
