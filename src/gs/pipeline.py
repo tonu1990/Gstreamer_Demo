@@ -21,30 +21,20 @@ log = logging.getLogger(__name__)
 
 # Env-tunable diagnostics
 DRAW_PROBE_BOX = os.getenv("DRAW_PROBE_BOX", "0") == "1"   # draw a yellow test rectangle always
-OD_LOG_EVERY   = int(os.getenv("OD_LOG_EVERY", "1"))       # log every N frames (1 = every frame)
-
+OD_LOG_EVERY   = int(os.getenv("OD_LOG_EVERY", "1"))       # DEBUG cadence (kept)
+OD_INFO_EVERY  = int(os.getenv("OD_INFO_EVERY", "1"))      # INFO cadence (new; 1 = every frame)
 
 class CameraPipeline:
     """
-    Unified pipeline (preview + detection):
+    v4l2src ! capsf ! queue ! tee name=t
 
-      v4l2src ! capsf ! queue ! tee name=t
+    Display chain attempts (in order):
+      A) tee ! q ! videoconvert ! caps(BGRA) ! cairooverlay ! videoconvert ! sink
+      B) tee ! q ! videoconvert ! cairooverlay ! sink
+      C) tee ! q ! videoconvert ! sink (preview-only fallback)
 
-      Display branch preference (with fallbacks):
-        # A) Force CPU-friendly format into Cairo, then convert to sink
-        t. ! queue ! videoconvert ! caps(video/x-raw,format=BGRA) !
-            cairooverlay name=overlay ! videoconvert ! sink
-
-        # B) Simple overlay (let caps negotiate)
-        t. ! queue ! videoconvert ! cairooverlay name=overlay ! sink
-
-        # C) Preview-only fallback
-        t. ! queue ! videoconvert ! sink
-
-      Inference branch (square RGB to model):
-        t. ! queue ! videoscale ! videoconvert !
-            caps(video/x-raw,format=RGB,width=MODEL_INPUT_SIZE,height=MODEL_INPUT_SIZE) !
-            appsink(drop=1,max-buffers=1,sync=false)
+    Inference:
+      tee ! q ! videoscale ! videoconvert ! caps(RGB, WxH=model) ! appsink
     """
 
     def __init__(self):
@@ -77,12 +67,12 @@ class CameraPipeline:
         self._last_stat_ts = time.time()
 
         # Overlay diagnostics
-        self._overlay_enabled = False   # whether overlay made it into the linked chain
+        self._overlay_enabled = False
         self._overlay_bufs = 0
         self._overlay_draw_calls = 0
         self._last_draw_log_ts = 0.0
 
-    # ---------------- Build / Start / Stop ----------------
+    # ---------------- Build helpers ----------------
 
     def _add(self, *elems):
         for el in elems:
@@ -96,10 +86,7 @@ class CameraPipeline:
         return ok
 
     def _try_display_chain_A(self, tee, sink):
-        """
-        A) tee -> q_disp -> conv_disp -> capsf_disp(BGRA) -> overlay -> conv_post -> sink
-        """
-        log.debug("Trying display chain A: conv->BGRA->cairooverlay->conv->sink")
+        log.info("Display chain A: conv->BGRA->cairooverlay->conv->sink")
         q_disp     = Gst.ElementFactory.make("queue", "q_disp")
         conv_disp  = Gst.ElementFactory.make("videoconvert", "conv_disp")
         capsf_disp = Gst.ElementFactory.make("capsfilter", "capsf_disp")
@@ -115,17 +102,14 @@ class CameraPipeline:
 
         self._add(q_disp, conv_disp, capsf_disp, overlay, conv_post)
 
-        # Callbacks only if overlay gets used
         overlay.connect("draw", self._on_overlay_draw)
         overlay.connect("caps-changed", self._on_overlay_caps_changed)
-
-        # Pad probe to confirm buffers reach overlay
         sinkpad = overlay.get_static_pad("sink")
         if sinkpad:
             sinkpad.add_probe(Gst.PadProbeType.BUFFER, self._on_overlay_buf)
 
         ok = (
-            self._safe_link(tee, q_disp,     "tee->q_disp") and
+            self._safe_link(tee, q_disp,       "tee->q_disp") and
             self._safe_link(q_disp, conv_disp, "q_disp->conv_disp") and
             self._safe_link(conv_disp, capsf_disp, "conv_disp->capsf_disp(BGRA)") and
             self._safe_link(capsf_disp, overlay, "capsf_disp->overlay") and
@@ -138,10 +122,7 @@ class CameraPipeline:
         return ok
 
     def _try_display_chain_B(self, tee, sink):
-        """
-        B) tee -> q_disp2 -> conv_disp2 -> overlay2 -> sink
-        """
-        log.debug("Trying display chain B: conv->cairooverlay->sink (no forced caps)")
+        log.info("Display chain B: conv->cairooverlay->sink")
         q_disp2     = Gst.ElementFactory.make("queue", "q_disp2")
         conv_disp2  = Gst.ElementFactory.make("videoconvert", "conv_disp2")
         overlay2    = Gst.ElementFactory.make("cairooverlay", "overlay")
@@ -159,10 +140,10 @@ class CameraPipeline:
             sinkpad.add_probe(Gst.PadProbeType.BUFFER, self._on_overlay_buf)
 
         ok = (
-            self._safe_link(tee, q_disp2,      "tee->q_disp2") and
-            self._safe_link(q_disp2, conv_disp2, "q_disp2->conv_disp2") and
+            self._safe_link(tee, q_disp2,         "tee->q_disp2") and
+            self._safe_link(q_disp2, conv_disp2,  "q_disp2->conv_disp2") and
             self._safe_link(conv_disp2, overlay2, "conv_disp2->overlay") and
-            self._safe_link(overlay2, sink,      "overlay->sink")
+            self._safe_link(overlay2, sink,       "overlay->sink")
         )
         if ok:
             self._overlay = overlay2
@@ -170,10 +151,7 @@ class CameraPipeline:
         return ok
 
     def _try_display_chain_C(self, tee, sink):
-        """
-        C) tee -> q_disp3 -> conv_disp3 -> sink   (preview-only fallback)
-        """
-        log.debug("Trying display chain C: conv->sink (no overlay)")
+        log.info("Display chain C: conv->sink (preview only)")
         q_disp3     = Gst.ElementFactory.make("queue", "q_disp3")
         conv_disp3  = Gst.ElementFactory.make("videoconvert", "conv_disp3")
         if not all([q_disp3, conv_disp3]):
@@ -182,7 +160,7 @@ class CameraPipeline:
         self._add(q_disp3, conv_disp3)
 
         ok = (
-            self._safe_link(tee, q_disp3,       "tee->q_disp3") and
+            self._safe_link(tee, q_disp3,        "tee->q_disp3") and
             self._safe_link(q_disp3, conv_disp3, "q_disp3->conv_disp3") and
             self._safe_link(conv_disp3, sink,    "conv_disp3->sink")
         )
@@ -190,6 +168,8 @@ class CameraPipeline:
             self._overlay = None
             self._overlay_enabled = False
         return ok
+
+    # ---------------- Build / Start / Stop ----------------
 
     def build(self, device: str, caps_str: str, window_handle: int) -> bool:
         if self.pipeline:
@@ -217,18 +197,18 @@ class CameraPipeline:
             self._teardown_on_error()
             return False
 
-        # Source & initial caps (e.g., video/x-raw,width=640,height=480)
+        # Source & initial caps
         source.set_property("device", device)
         caps = Gst.Caps.from_string(caps_str)
         capsf.set_property("caps", caps)
 
-        # Inference caps: square RGB for the model (avoid Python resize cost)
+        # Inference caps: square RGB for the model
         caps_inf = Gst.Caps.from_string(
             f"video/x-raw,format=RGB,width={MODEL_INPUT_SIZE},height={MODEL_INPUT_SIZE}"
         )
         capsf_inf.set_property("caps", caps_inf)
 
-        # appsink tuned for realtime
+        # appsink realtime
         appsink.set_property("emit-signals", False)
         appsink.set_property("max-buffers", 1)
         appsink.set_property("drop", True)
@@ -244,7 +224,7 @@ class CameraPipeline:
             self._teardown_on_error()
             return False
 
-        # Try display chain A, then B, then C (preview-only)
+        # Try display chains
         display_ok = self._try_display_chain_A(tee, sink)
         if not display_ok:
             log.warning("Display chain A failed; trying chain B...")
@@ -257,7 +237,7 @@ class CameraPipeline:
             self._teardown_on_error()
             return False
 
-        # Link inference: tee → q_inf → scale_inf → conv_inf → capsf_inf(RGB,sq) → appsink
+        # Link inference
         if not (self._safe_link(tee, q_inf, "tee->q_inf") and
                 self._safe_link(q_inf, scale_inf, "q_inf->scale_inf") and
                 self._safe_link(scale_inf, conv_inf, "scale_inf->conv_inf") and
@@ -266,7 +246,6 @@ class CameraPipeline:
             self._teardown_on_error()
             return False
 
-        # Keep refs
         self._sink = sink
         self._appsink = appsink
 
@@ -404,9 +383,11 @@ class CameraPipeline:
                     idx = self._frames_pulled + 1
                     self._frames_pulled = idx
 
-                    if idx % OD_LOG_EVERY == 0:
-                        log.debug(f"[worker] F{idx}: pulled frame {w}x{h} RGB")
+                    # Per-frame INFO (controllable)
+                    if idx % OD_INFO_EVERY == 0:
+                        log.info(f"[worker] F{idx}: pulled frame {w}x{h} RGB")
 
+                    # Inference
                     dets_sq = self._model.infer_rgb_square(
                         frame, conf_thres=0.15, iou_thres=0.45, top_k=300
                     )
@@ -414,9 +395,9 @@ class CameraPipeline:
                     if n > 0:
                         self._frames_with_dets += 1
 
-                    if idx % OD_LOG_EVERY == 0:
-                        log.debug(f"[worker] F{idx}: n_dets={n}, boxes(model_space)={dets_sq['boxes'][:3]}, "
-                                  f"scores={dets_sq['scores'][:3]}, classes={dets_sq['classes'][:3]}")
+                    if idx % OD_INFO_EVERY == 0:
+                        log.info(f"[worker] F{idx}: n_dets={n}, boxes(model_space)={dets_sq['boxes'][:3]}, "
+                                 f"scores={dets_sq['scores'][:3]}, classes={dets_sq['classes'][:3]}")
 
                     with self._dets_lock:
                         self._latest_dets = dets_sq
@@ -443,7 +424,7 @@ class CameraPipeline:
         self._overlay_bufs += 1
         now = time.time()
         if self._overlay_bufs <= 5 or (now - self._last_draw_log_ts) > 2.0:
-            log.debug(f"[overlay] sink pad received buffer #{self._overlay_bufs}")
+            log.info(f"[overlay] sink pad received buffer #{self._overlay_bufs}")
             self._last_draw_log_ts = now
         return Gst.PadProbeReturn.OK
 
@@ -457,10 +438,10 @@ class CameraPipeline:
         self._overlay_draw_calls += 1
         now = time.time()
         if self._overlay_draw_calls <= 5 or (now - self._last_draw_log_ts) > 2.0:
-            log.debug(f"[overlay] draw call #{self._overlay_draw_calls}")
+            log.info(f"[overlay] draw call #{self._overlay_draw_calls}")
             self._last_draw_log_ts = now
 
-        # Probe rectangle to prove drawing works even with detection off
+        # Always visible probe (when enabled)
         if DRAW_PROBE_BOX:
             try:
                 context.set_source_rgb(1.0, 1.0, 0.0)  # yellow
@@ -468,9 +449,9 @@ class CameraPipeline:
                 context.rectangle(40, 40, 160, 120)
                 context.stroke()
             except Exception as e:
-                log.debug(f"Overlay probe box error: {e}")
+                log.info(f"[overlay] probe box error: {e}")
 
-        # Watermark when detection is ON
+        # Watermark when detection ON
         if self._detection_enabled:
             try:
                 context.set_source_rgb(1.0, 0.0, 0.0)  # red
@@ -483,7 +464,7 @@ class CameraPipeline:
                 context.show_text("DETECT ON")
                 context.stroke()
             except Exception as e:
-                log.debug(f"Overlay watermark error: {e}")
+                log.info(f"[overlay] watermark error: {e}")
 
         # Draw detections (if any)
         with self._dets_lock:
@@ -491,7 +472,7 @@ class CameraPipeline:
 
         n_dets = 0 if not dets else len(dets.get("boxes", []))
         if self._detection_enabled and dets:
-            log.debug(f"[draw] have {n_dets} dets; disp={self._disp_w}x{self._disp_h} model={MODEL_INPUT_SIZE}")
+            log.info(f"[draw] have {n_dets} dets; disp={self._disp_w}x{self._disp_h} model={MODEL_INPUT_SIZE}")
 
         if not self._detection_enabled or not dets or not dets.get("boxes"):
             return
@@ -516,7 +497,8 @@ class CameraPipeline:
                     continue
 
                 if i < 3:
-                    log.debug(f"[draw] box{i}: model={xyxy} -> disp={[X1, Y1, X2, Y2]} score={score:.2f} cls={cls_id}")
+                    log.info(f"[draw] box{i}: model={xyxy} -> disp={[round(X1,1), round(Y1,1), round(X2,1), round(Y2,1)]} "
+                             f"score={score:.2f} cls={cls_id}")
 
                 context.set_source_rgb(0.0, 1.0, 0.0)  # green box
                 context.rectangle(X1, Y1, w, h)
@@ -529,7 +511,7 @@ class CameraPipeline:
                 except Exception:
                     pass
         except Exception as e:
-            log.debug(f"Overlay draw error: {e}")
+            log.info(f"[overlay] draw error: {e}")
 
     # ---------------- Bus callbacks ----------------
 

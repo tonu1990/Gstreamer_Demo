@@ -62,11 +62,13 @@ class OnnxYoloV8:
         Returns dict with xyxy boxes in that square pixel space.
         """
         H, W, C = rgb.shape
-        log.debug(f"[infer] frame_in: {W}x{H}x{C}, expected={self.input_size}")
+        log.info(f"[infer] in-frame: {W}x{H}x{C}, model_input={self.input_size}")
+
         img = rgb.astype(np.float32) / 255.0
         img = np.transpose(img, (2, 0, 1))[None, ...]  # (1,3,H,W)
 
         out = self.sess.run(self.onames, {self.iname: img})[0]  # (1,N,84) or (1,84,N)
+
         if self.layout_N_first:
             preds = out[0]              # (N, 84)
             xywh = preds[:, :4]
@@ -82,10 +84,10 @@ class OnnxYoloV8:
         class_ids = np.argmax(scores_all, axis=1)
         confs = scores_all[np.arange(scores_all.shape[0]), class_ids]
 
-        total_preds = confs.shape[0]
+        total_preds = int(confs.shape[0])
         keep_mask = confs >= conf_thres
         kept = int(np.count_nonzero(keep_mask))
-        log.debug(f"[infer] raw_preds={total_preds}, kept@{conf_thres}={kept}")
+        log.info(f"[infer] raw_preds={total_preds}, kept@{conf_thres}={kept}")
 
         if kept == 0:
             return {"boxes": [], "scores": [], "classes": []}
@@ -98,7 +100,9 @@ class OnnxYoloV8:
         max_val = float(np.max(xywh)) if xywh.size else 0.0
         if max_val <= 2.0:
             xywh = xywh * float(self.input_size)
-            log.debug("[infer] xywh normalized -> scaled to pixel space")
+            log.info("[infer] xywh appears normalized; scaled to pixel space")
+        else:
+            log.info(f"[infer] xywh appears pixel-space already (max={max_val:.1f})")
 
         # xywh -> xyxy
         x, y, w, h = xywh.T
@@ -108,19 +112,23 @@ class OnnxYoloV8:
         y2 = y + h / 2
         boxes_xyxy = np.stack([x1, y1, x2, y2], axis=1)
 
-        # Sanity clamp to model square
+        # Clamp to model square
         boxes_xyxy[:, [0, 2]] = np.clip(boxes_xyxy[:, [0, 2]], 0, self.input_size - 1)
         boxes_xyxy[:, [1, 3]] = np.clip(boxes_xyxy[:, [1, 3]], 0, self.input_size - 1)
 
         # NMS
         keep_idx = _nms_xyxy(boxes_xyxy, confs, iou_thres=iou_thres, top_k=top_k)
+        n_after = int(keep_idx.size)
         boxes_xyxy = boxes_xyxy[keep_idx]
         confs = confs[keep_idx]
         class_ids = class_ids[keep_idx]
 
         # Log first few boxes
-        sample = boxes_xyxy[:3].tolist()
-        log.debug(f"[infer] after_nms: n={len(boxes_xyxy)}, sample_boxes(model_space)={sample}")
+        sample_boxes = boxes_xyxy[:3].tolist()
+        sample_scores = confs[:3].tolist()
+        sample_classes = class_ids[:3].tolist()
+        log.info(f"[infer] after_nms: n={n_after}, sample_boxes(model_space)={sample_boxes}, "
+                 f"scores={sample_scores}, classes={sample_classes}")
 
         return {
             "boxes": boxes_xyxy.tolist(),   # pixel coords in model square (0..input_size)
