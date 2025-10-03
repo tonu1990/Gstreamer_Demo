@@ -20,52 +20,49 @@ from detect.onnx_yolov8 import OnnxYoloV8
 
 log = logging.getLogger(__name__)
 
-DRAW_PROBE_BOX = os.getenv("DRAW_PROBE_BOX", "0") == "1"   # force a test rectangle
-OD_LOG_EVERY   = int(os.getenv("OD_LOG_EVERY", "1"))        # log every N frames (1 = log every frame)
+DRAW_PROBE_BOX = os.getenv("DRAW_PROBE_BOX", "0") == "1"
+OD_LOG_EVERY   = int(os.getenv("OD_LOG_EVERY", "1"))
 
 class CameraPipeline:
     """
-    Unified pipeline (preview + detection):
-      v4l2src ! capsf ! queue ! tee name=t
+    v4l2src ! capsf ! queue ! tee name=t
 
-      # Display branch
-      t. ! queue ! videoconvert ! cairooverlay name=overlay ! <sink>
+    # Display branch
+    t. ! queue ! videoconvert ! capsf_disp(RGBA) ! cairooverlay name=overlay ! <sink>
 
-      # Inference branch (ONNX worker reads here)
-      t. ! queue ! videoscale ! videoconvert !
-          capsf_inf (video/x-raw,format=RGB,width=MODEL_INPUT_SIZE,height=MODEL_INPUT_SIZE)
-          ! appsink name=appsink
+    # Inference branch
+    t. ! queue ! videoscale ! videoconvert !
+        capsf_inf(RGB, MODEL_INPUT_SIZE x MODEL_INPUT_SIZE) ! appsink name=appsink
     """
     def __init__(self):
         self.pipeline = None
         self._bus = None
         self._handle_set = False
 
-        # Elements
         self._sink = None
         self._overlay = None
         self._appsink = None
 
-        # Overlay/display size
         self._disp_w = None
         self._disp_h = None
 
-        # Detection state
         self._detection_enabled = False
         self._dets_lock = threading.Lock()
-        self._latest_dets = None  # {"boxes":[(x1,y1,x2,y2)], "scores":[...], "classes":[...]}
+        self._latest_dets = None
 
-        # Worker
         self._worker = None
         self._stop_evt = threading.Event()
         self._model = None
 
-        # Debug counters
         self._frames_pulled = 0
         self._frames_with_dets = 0
         self._last_stat_ts = time.time()
 
-    # -------- Pipeline build --------
+        # New overlay diagnostics
+        self._overlay_bufs = 0
+        self._overlay_draw_calls = 0
+        self._last_draw_log_ts = 0.0
+
     def build(self, device: str, caps_str: str, window_handle: int) -> bool:
         if self.pipeline:
             self.stop()
@@ -77,11 +74,14 @@ class CameraPipeline:
         q0     = Gst.ElementFactory.make("queue", "q0")
         tee    = Gst.ElementFactory.make("tee", "tee")
 
-        q_disp    = Gst.ElementFactory.make("queue", "q_disp")
-        conv_disp = Gst.ElementFactory.make("videoconvert", "conv_disp")
-        overlay   = Gst.ElementFactory.make("cairooverlay", "overlay")
-        sink      = choose_sink()
+        # Display branch
+        q_disp     = Gst.ElementFactory.make("queue", "q_disp")
+        conv_disp  = Gst.ElementFactory.make("videoconvert", "conv_disp")
+        capsf_disp = Gst.ElementFactory.make("capsfilter", "capsf_disp")  # force RGBA
+        overlay    = Gst.ElementFactory.make("cairooverlay", "overlay")
+        sink       = choose_sink()
 
+        # Inference branch
         q_inf     = Gst.ElementFactory.make("queue", "q_inf")
         scale_inf = Gst.ElementFactory.make("videoscale", "scale_inf")
         conv_inf  = Gst.ElementFactory.make("videoconvert", "conv_inf")
@@ -89,7 +89,7 @@ class CameraPipeline:
         appsink   = Gst.ElementFactory.make("appsink", "appsink")
 
         elems = [source, capsf, q0, tee,
-                 q_disp, conv_disp, overlay, sink,
+                 q_disp, conv_disp, capsf_disp, overlay, sink,
                  q_inf, scale_inf, conv_inf, capsf_inf, appsink]
 
         if not all(elems):
@@ -101,6 +101,11 @@ class CameraPipeline:
         caps = Gst.Caps.from_string(caps_str)
         capsf.set_property("caps", caps)
 
+        # Force RGBA for cairooverlay to ensure Cairo-compatible format
+        caps_disp = Gst.Caps.from_string("video/x-raw,format=RGBA")
+        capsf_disp.set_property("caps", caps_disp)
+
+        # Inference caps: square RGB for model
         caps_inf = Gst.Caps.from_string(
             f"video/x-raw,format=RGB,width={MODEL_INPUT_SIZE},height={MODEL_INPUT_SIZE}"
         )
@@ -119,11 +124,14 @@ class CameraPipeline:
             self._teardown_on_error()
             return False
 
-        if not (tee.link(q_disp) and q_disp.link(conv_disp) and conv_disp.link(overlay) and overlay.link(sink)):
+        # Display: tee -> q_disp -> conv_disp -> capsf_disp(RGBA) -> overlay -> sink
+        if not (tee.link(q_disp) and q_disp.link(conv_disp) and
+                conv_disp.link(capsf_disp) and capsf_disp.link(overlay) and overlay.link(sink)):
             log.error("Linking display branch failed")
             self._teardown_on_error()
             return False
 
+        # Inference: tee -> q_inf -> scale_inf -> conv_inf -> capsf_inf(RGB,sq) -> appsink
         if not (tee.link(q_inf) and q_inf.link(scale_inf) and scale_inf.link(conv_inf) and
                 conv_inf.link(capsf_inf) and capsf_inf.link(appsink)):
             log.error("Linking inference branch failed")
@@ -134,9 +142,16 @@ class CameraPipeline:
         self._overlay = overlay
         self._appsink = appsink
 
+        # Overlay callbacks
         overlay.connect("draw", self._on_overlay_draw)
         overlay.connect("caps-changed", self._on_overlay_caps_changed)
 
+        # Pad probe to confirm buffers reach overlay
+        sinkpad = overlay.get_static_pad("sink")
+        if sinkpad:
+            sinkpad.add_probe(Gst.PadProbeType.BUFFER, self._on_overlay_buf)
+
+        # Bus
         self._bus = self.pipeline.get_bus()
         self._bus.add_signal_watch()
         self._bus.connect("message::error", self._on_error)
@@ -161,7 +176,6 @@ class CameraPipeline:
         self._overlay = None
         self._sink = None
 
-    # -------- Control --------
     def start(self) -> bool:
         if not self.pipeline:
             return False
@@ -215,7 +229,6 @@ class CameraPipeline:
             self._stop_worker()
             log.info("Object detection DISABLED")
 
-    # -------- Worker management --------
     def _start_worker(self):
         if self._worker and self._worker.is_alive():
             return
@@ -223,6 +236,9 @@ class CameraPipeline:
         self._frames_pulled = 0
         self._frames_with_dets = 0
         self._last_stat_ts = time.time()
+        self._overlay_bufs = 0
+        self._overlay_draw_calls = 0
+        self._last_draw_log_ts = 0.0
         self._worker = threading.Thread(target=self._worker_loop, name="onnx-worker", daemon=True)
         self._worker.start()
         log.info("ONNX worker thread started")
@@ -235,7 +251,7 @@ class CameraPipeline:
         self._worker = None
         log.info("ONNX worker thread stopped")
 
-    # -------- Worker loop --------
+    # ---- Inference worker ----
     def _worker_loop(self):
         appsink = self._appsink
         if appsink is None:
@@ -266,18 +282,13 @@ class CameraPipeline:
                     if idx % OD_LOG_EVERY == 0:
                         log.debug(f"[worker] F{idx}: pulled frame {w}x{h} RGB")
 
-                    # Inference
                     dets_sq = self._model.infer_rgb_square(frame, conf_thres=0.15, iou_thres=0.45, top_k=300)
                     n = len(dets_sq["boxes"])
                     if n > 0:
                         self._frames_with_dets += 1
 
                     if idx % OD_LOG_EVERY == 0:
-                        # Log up to 3 boxes
-                        sample_boxes = dets_sq["boxes"][:3]
-                        sample_scores = dets_sq["scores"][:3]
-                        sample_classes = dets_sq["classes"][:3]
-                        log.debug(f"[worker] F{idx}: n_dets={n}, boxes(model_space)={sample_boxes}, scores={sample_scores}, classes={sample_classes}")
+                        log.debug(f"[worker] F{idx}: n_dets={n}, boxes(model_space)={dets_sq['boxes'][:3]}, scores={dets_sq['scores'][:3]}, classes={dets_sq['classes'][:3]}")
 
                     with self._dets_lock:
                         self._latest_dets = dets_sq
@@ -298,7 +309,14 @@ class CameraPipeline:
             log.info(f"[worker] pulled={pulled}, frames_with_dets={with_d} ({ratio:.1f}%)")
             self._last_stat_ts = now
 
-    # -------- Overlay callbacks --------
+    # ---- Overlay diagnostics ----
+    def _on_overlay_buf(self, pad, info):
+        self._overlay_bufs += 1
+        if self._overlay_bufs <= 5 or (time.time() - self._last_draw_log_ts) > 2.0:
+            log.debug(f"[overlay] sink pad received buffer #{self._overlay_bufs}")
+            self._last_draw_log_ts = time.time()
+        return Gst.PadProbeReturn.OK
+
     def _on_overlay_caps_changed(self, overlay, caps):
         s = caps.get_structure(0)
         self._disp_w = s.get_value('width')
@@ -306,6 +324,11 @@ class CameraPipeline:
         log.info(f"Overlay caps-changed: {self._disp_w}x{self._disp_h}")
 
     def _on_overlay_draw(self, overlay, context, timestamp, duration):
+        self._overlay_draw_calls += 1
+        if self._overlay_draw_calls <= 5 or (time.time() - self._last_draw_log_ts) > 2.0:
+            log.debug(f"[overlay] draw call #{self._overlay_draw_calls}")
+            self._last_draw_log_ts = time.time()
+
         # Probe rectangle (proves drawing works)
         if DRAW_PROBE_BOX:
             try:
@@ -353,24 +376,20 @@ class CameraPipeline:
             context.select_font_face("Sans")
             context.set_font_size(14.0)
 
-            # Log first few boxes in both spaces (model space and scaled display)
             for i, (xyxy, score, cls_id) in enumerate(zip(dets["boxes"], dets["scores"], dets["classes"])):
-                if i < 3:
-                    X1 = xyxy[0] * sx; Y1 = xyxy[1] * sy; X2 = xyxy[2] * sx; Y2 = xyxy[3] * sy
-                    log.debug(f"[draw] box{i}: model={xyxy} -> disp={[X1, Y1, X2, Y2]} score={score:.2f} cls={cls_id}")
-
                 x1, y1, x2, y2 = xyxy
                 X1 = x1 * sx; Y1 = y1 * sy; X2 = x2 * sx; Y2 = y2 * sy
                 w = max(0.0, X2 - X1); h = max(0.0, Y2 - Y1)
                 if w < 1.0 or h < 1.0:
                     continue
 
-                # Box
+                if i < 3:
+                    log.debug(f"[draw] box{i}: model={xyxy} -> disp={[X1, Y1, X2, Y2]} score={score:.2f} cls={cls_id}")
+
                 context.set_source_rgb(0.0, 1.0, 0.0)  # green box
                 context.rectangle(X1, Y1, w, h)
                 context.stroke()
 
-                # Label
                 try:
                     context.move_to(X1 + 3, max(16.0, Y1 + 16))
                     context.show_text(f"{int(cls_id)}:{score:.2f}")
@@ -380,7 +399,7 @@ class CameraPipeline:
         except Exception as e:
             log.debug(f"Overlay draw error: {e}")
 
-    # -------- Bus callbacks --------
+    # ---- Bus callbacks ----
     def _on_error(self, bus, msg):
         err, debug = msg.parse_error()
         log.error(f"GStreamer ERROR: {err.message}")
