@@ -301,10 +301,12 @@ class CameraPipeline:
         if self._detection_enabled:
             try:
                 context.set_source_rgb(1.0, 0.0, 0.0)  # red
-                context.set_line_width(1.5)
-                context.rectangle(6, 6, 90, 20)
+                context.set_line_width(2.0)
+                context.rectangle(6, 6, 120, 26)
                 context.stroke()
-                context.move_to(10, 20)
+                context.select_font_face("Sans")
+                context.set_font_size(16.0)
+                context.move_to(12, 24)
                 context.show_text("DETECT ON")
                 context.stroke()
             except Exception as e:
@@ -324,24 +326,39 @@ class CameraPipeline:
         sy = self._disp_h / inp
 
         try:
-            context.set_line_width(2.0)
+            context.set_line_width(3.0)
+            context.select_font_face("Sans")
+            context.set_font_size(14.0)
+            # Log the first few boxes once (helpful for scale debugging)
+            if hasattr(self, "_logged_first_boxes") is False or getattr(self, "_logged_first_boxes", False) is False:
+                sample_boxes = dets["boxes"][:3]
+                log.info(f"Sample boxes (model space): {sample_boxes}")
+                self._logged_first_boxes = True
+
             for (x1, y1, x2, y2), score, cls_id in zip(dets["boxes"], dets["scores"], dets["classes"]):
+                # Scale from model square space to display
                 X1 = x1 * sx; Y1 = y1 * sy; X2 = x2 * sx; Y2 = y2 * sy
                 w = max(0.0, X2 - X1); h = max(0.0, Y2 - Y1)
 
+                # Safety: skip degenerate boxes
+                if w < 1.0 or h < 1.0:
+                    continue
+
+                # Box
                 context.set_source_rgb(0.0, 1.0, 0.0)  # green box
                 context.rectangle(X1, Y1, w, h)
                 context.stroke()
 
-                # label
+                # Label
                 try:
-                    context.move_to(X1 + 3, max(12.0, Y1 + 12))
+                    context.move_to(X1 + 3, max(16.0, Y1 + 16))
                     context.show_text(f"{int(cls_id)}:{score:.2f}")
                     context.stroke()
                 except Exception:
                     pass
         except Exception as e:
             log.debug(f"Overlay draw error: {e}")
+
 
     # -------- Bus callbacks --------
     def _on_error(self, bus, msg):
