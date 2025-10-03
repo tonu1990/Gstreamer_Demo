@@ -12,16 +12,17 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
  && rm -rf /var/lib/apt/lists/*
 
-# Your app
 WORKDIR /app
 COPY src/ /app/src/
-
-# COCO labels live in the repo (not the model)
 COPY labels.json /app/labels.json
 ENV LABELS_PATH=/app/labels.json
 
-# (If you have a requirements.txt, install it here)
+# Make Python see /app/src as a top-level package root
+ENV PYTHONPATH=/app/src
+
+# (keep your apt installs for GTK/gi/cairo/gstreamer that we discussed)
+
+# If you also use requirements.txt, install it here
 # RUN pip install -r requirements.txt
 
-# Entrypoint as before
 CMD ["python3", "-m", "app.main"]
