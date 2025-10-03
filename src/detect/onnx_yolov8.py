@@ -43,7 +43,7 @@ class OnnxYoloV8:
         self.iname = self.sess.get_inputs()[0].name
         self.onames = [o.name for o in self.sess.get_outputs()]
 
-        # Probe output shape/layout
+        # Probe output layout
         dummy = np.zeros((1, 3, self.input_size, self.input_size), dtype=np.float32)
         out = self.sess.run(self.onames, {self.iname: dummy})[0]
         if out.ndim != 3:
@@ -55,7 +55,7 @@ class OnnxYoloV8:
     def infer_rgb_square(self, rgb: np.ndarray, conf_thres=0.15, iou_thres=0.45, top_k=300):
         """
         rgb: HxWx3 uint8, already resized to (input_size,input_size), RGB
-        Returns dict with xyxy boxes in that square space.
+        Returns dict with xyxy boxes in that square pixel space.
         """
         img = rgb.astype(np.float32) / 255.0
         img = np.transpose(img, (2, 0, 1))[None, ...]  # (1,3,H,W)
@@ -65,7 +65,7 @@ class OnnxYoloV8:
         if self.layout_N_first:
             preds = out[0]              # (N, 84)
             xywh = preds[:, :4]
-            scores_all = preds[:, 4:]   # class scores (80 cols)
+            scores_all = preds[:, 4:]   # class scores
         else:
             preds = out[0]              # (84, N)
             xywh = preds[:4, :].T
@@ -77,7 +77,6 @@ class OnnxYoloV8:
         class_ids = np.argmax(scores_all, axis=1)
         confs = scores_all[np.arange(scores_all.shape[0]), class_ids]
 
-        # Debug: counts before/after threshold
         total_preds = confs.shape[0]
         keep = confs >= conf_thres
         kept = int(np.count_nonzero(keep))
@@ -89,6 +88,12 @@ class OnnxYoloV8:
         xywh = xywh[keep]
         confs = confs[keep]
         class_ids = class_ids[keep]
+
+        # 🔧 Heuristic: if outputs look normalized (<= ~2), scale up to pixel coords
+        max_val = float(np.max(xywh))
+        if max_val <= 2.0:
+            xywh = xywh * float(self.input_size)
+            log.debug("Scaled normalized xywh to pixel space")
 
         # xywh -> xyxy
         x, y, w, h = xywh.T
@@ -104,7 +109,7 @@ class OnnxYoloV8:
         class_ids = class_ids[keep_idx]
 
         return {
-            "boxes": boxes_xyxy.tolist(),
+            "boxes": boxes_xyxy.tolist(),   # pixel coords in model square (0..input_size)
             "scores": confs.tolist(),
             "classes": class_ids.tolist(),
         }
