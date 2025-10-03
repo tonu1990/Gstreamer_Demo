@@ -28,7 +28,17 @@ def main():
         else:
             pipe.stop()
 
+    def on_detection(start: bool):
+        # UI already disables the button when preview is off,
+        # but keep a safety guard to avoid surprises.
+        if not pipe.pipeline:
+            print("Detection toggle ignored: preview pipeline not running.")
+            return
+        pipe.set_detection_enabled(start)
+
     ui.preview_toggled.connect(on_preview)
+    ui.detection_toggled.connect(on_detection)
+
     ui.show()
     sys.exit(app.exec())
 

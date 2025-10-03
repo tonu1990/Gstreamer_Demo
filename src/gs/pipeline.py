@@ -1,7 +1,8 @@
+import sys
 import gi
 gi.require_version('Gst', '1.0')
 gi.require_version('GstVideo', '1.0')
-from gi.repository import Gst, GstVideo
+from gi.repository import Gst, GstVideo, GLib
 
 from gs.sinks import choose_sink
 from shared.qt_gst_bridge import set_overlay_handle
@@ -11,6 +12,7 @@ class CameraPipeline:
         self.pipeline = None
         self._handle_set = False
         self._bus = None
+        self._detection_enabled = False  # NEW: detection mode flag
 
     def build(self, device: str, caps_str: str, window_handle: int) -> bool:
         if self.pipeline:
@@ -74,7 +76,13 @@ class CameraPipeline:
             self.pipeline = None
             self._bus = None
             self._handle_set = False
+            self._detection_enabled = False  # reset on stop
             print("Camera preview stopped")
+
+    # NEW: detection mode toggling (stub – will be wired to overlay/appsink next)
+    def set_detection_enabled(self, enable: bool):
+        self._detection_enabled = bool(enable)
+        print(f"Object detection {'ENABLED' if self._detection_enabled else 'DISABLED'} (stub)")
 
     # Bus callbacks
     def _on_error(self, bus, msg):
