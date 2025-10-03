@@ -10,8 +10,8 @@ import gi
 gi.require_version("Gst", "1.0")
 gi.require_version("GstVideo", "1.0")
 gi.require_version("GObject", "2.0")
-gi.require_version("cairo", "1.0")
-from gi.repository import Gst, GstVideo, GObject, cairo  # type: ignore
+from gi.repository import Gst, GstVideo, GObject  # type: ignore
+import cairo
 
 import numpy as np
 
