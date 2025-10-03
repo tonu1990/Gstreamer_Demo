@@ -112,7 +112,7 @@ class OnnxYoloV8:
         y2 = y + h / 2
         boxes_xyxy = np.stack([x1, y1, x2, y2], axis=1)
 
-        # Clamp to model square
+        # Clamp
         boxes_xyxy[:, [0, 2]] = np.clip(boxes_xyxy[:, [0, 2]], 0, self.input_size - 1)
         boxes_xyxy[:, [1, 3]] = np.clip(boxes_xyxy[:, [1, 3]], 0, self.input_size - 1)
 
@@ -123,7 +123,7 @@ class OnnxYoloV8:
         confs = confs[keep_idx]
         class_ids = class_ids[keep_idx]
 
-        # Log first few boxes
+        # Sample log
         sample_boxes = boxes_xyxy[:3].tolist()
         sample_scores = confs[:3].tolist()
         sample_classes = class_ids[:3].tolist()

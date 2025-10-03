@@ -8,11 +8,11 @@ HEIGHT = int(os.getenv("CAM_HEIGHT", "480"))
 # If you run Wayland and embedding fails, forcing X11 via Qt often helps:
 QT_PLATFORM = os.getenv("QT_QPA_PLATFORM", "")  # e.g., "xcb"
 
+# Object detection model config (mounted at runtime on the Pi)
+MODEL_DIR = os.getenv("MODEL_DIR", "/models")
+MODEL_PATH = os.getenv("MODEL_PATH", "/models/current.onnx")
+MODEL_INPUT_SIZE = int(os.getenv("MODEL_INPUT_SIZE", "640"))
+
 def caps_str(width=WIDTH, height=HEIGHT) -> str:
     # keep it simple; add format/framerate later if needed
     return f"video/x-raw,width={width},height={height}"
-
-
-# ONNX model config (mounted at runtime)
-MODEL_PATH = os.getenv("MODEL_PATH", "/models/current.onnx")
-MODEL_INPUT_SIZE = int(os.getenv("MODEL_INPUT_SIZE", "640"))
