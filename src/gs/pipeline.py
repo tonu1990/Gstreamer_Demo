@@ -2,6 +2,7 @@ import logging
 import threading
 import time
 import os
+import json 
 from pathlib import Path
 
 import gi
@@ -14,7 +15,7 @@ import numpy as np
 
 from gs.sinks import choose_sink
 from shared.qt_gst_bridge import set_overlay_handle
-from app.config import MODEL_PATH, MODEL_INPUT_SIZE
+from app.config import MODEL_PATH, MODEL_INPUT_SIZE, LABELS_PATH, SHOW_CLASS_NAMES
 from detect.onnx_yolov8 import OnnxYoloV8
 
 log = logging.getLogger(__name__)
@@ -66,7 +67,39 @@ class CameraPipeline:
         self._overlay_draw_calls = 0
         self._last_draw_log_ts = 0.0
 
+        self._labels = None
+        self._show_labels = SHOW_CLASS_NAMES
+
     # ---------------- Build helpers ----------------
+    def _load_labels_once(self):
+        """Lazy-load labels.json -> dict[int,str], safe to call multiple times."""
+        if self._labels is not None:
+            return
+        p = Path(LABELS_PATH)
+        if not p.exists():
+            log.info(f"labels.json not found at {p}; falling back to numeric class ids")
+            self._labels = {}
+            return
+        try:
+            with p.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            # Coerce keys to int; accept both {"41":"cup"} and {41:"cup"}
+            labels = {}
+            if isinstance(data, dict):
+                for k, v in data.items():
+                    try:
+                        labels[int(k)] = str(v)
+                    except Exception:
+                        continue
+            else:
+                log.warning(f"labels.json at {p} is not an object; ignoring")
+                labels = {}
+            self._labels = labels
+            log.info(f"Loaded {len(labels)} labels from {p}")
+        except Exception as e:
+            log.warning(f"Failed to parse labels.json at {p}: {e}; falling back to ids")
+            self._labels = {}
+
 
     def _add(self, *elems):
         for el in elems:
@@ -298,7 +331,7 @@ class CameraPipeline:
 
     def set_detection_enabled(self, enable: bool):
         enable = bool(enable)
-        if enable == self._detection_enabled:
+        if enable == self._detection_enabled:            
             log.info(f"Detection already {'ENABLED' if enable else 'DISABLED'}")
             return
         if not self._overlay_enabled and enable:
@@ -306,6 +339,7 @@ class CameraPipeline:
         self._detection_enabled = enable
 
         if enable:
+            self._load_labels_once()
             if not Path(MODEL_PATH).exists():
                 log.error(f"MODEL_PATH not found: {MODEL_PATH}")
                 self._detection_enabled = False
@@ -497,8 +531,12 @@ class CameraPipeline:
                 context.stroke()
 
                 try:
+                    name = None
+                    if self._show_labels and self._labels is not None:
+                        name = self._labels.get(int(cls_id))
+                    label_text = f"{name if name else int(cls_id)}:{score:.2f}"
                     context.move_to(X1 + 3, max(16.0, Y1 + 16))
-                    context.show_text(f"{int(cls_id)}:{score:.2f}")
+                    context.show_text(label_text)
                     context.stroke()
                 except Exception:
                     pass
